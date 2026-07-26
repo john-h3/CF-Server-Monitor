@@ -1,12 +1,16 @@
 import { http, isAdminLoggedIn } from './http'
-import { getApiBases, getWsBase } from './config'
+import { getApiBases, getWsBase, hasMultipleApiBases, getTitle } from './config'
+import { DEFAULT_SITE_TITLE } from './constants'
 import { ref } from 'vue'
 import { normalizeTimestamp } from './time.js'
 import { TIME } from './constants'
+import { resolveDisplayMode } from './displayMode.js'
 
 export { getApiBases, getWsBase }
 
 export const VERSION = ref('')
+export const LAST_WORKERS_VERSION = ref('')
+export const LAST_AGENT_VERSION = ref('')
 
 export const createLiveSocket = (subscribe, handlers = {}, apiIndex = 0, serverIds = []) => {
   const { onUpdate, onStatus, onMessage } = handlers
@@ -200,7 +204,7 @@ export const createLiveSocket = (subscribe, handlers = {}, apiIndex = 0, serverI
 
 export const getFlagRegionCode = (region) => {
   const code = (region || '').toUpperCase()
-  if (code === 'TW' || code === 'HK' || code === 'MO') return 'cn'
+  if (code === 'TW') return 'cn'
   return code.toLowerCase()
 }
 
@@ -211,26 +215,7 @@ export const formatBytes = (bytes) => {
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
   const i = Math.floor(Math.log(bytes) / Math.log(k))
   const safeIndex = Math.max(0, Math.min(i, sizes.length - 1))
-  return parseFloat((bytes / Math.pow(k, safeIndex)).toFixed(2)) + ' ' + sizes[safeIndex]
-}
-
-export const getTrafficUsagePercent = (server) => {
-  const limit = parseFloat(server.traffic_limit) || 0
-  if (limit <= 0) return '0'
-
-  const limitBytes = limit * 1024 * 1024 * 1024
-  let usedBytes = 0
-
-  const calcType = server.traffic_calc_type || 'total'
-  if (calcType === 'dl') {
-    usedBytes = parseFloat(server.net_rx_monthly) || 0
-  } else if (calcType === 'ul') {
-    usedBytes = parseFloat(server.net_tx_monthly) || 0
-  } else {
-    usedBytes = (parseFloat(server.net_rx_monthly) || 0) + (parseFloat(server.net_tx_monthly) || 0)
-  }
-
-  return ((usedBytes / limitBytes) * 100).toFixed(1)
+  return parseFloat((bytes / Math.pow(k, safeIndex)).toFixed(1)) + ' ' + sizes[safeIndex]
 }
 
 export const isServerOnline = (server, now = Date.now()) => {
@@ -246,58 +231,93 @@ export const fetchServers = async () => {
 
 export const fetchServersAll = async () => {
   const results = await http.getAll('/api/servers')
-  const mergedData = {
-    servers: [],
-    stats: { total: 0, online: 0, offline: 0, globalNetRx: 0, globalNetTx: 0, globalSpeedIn: 0, globalSpeedOut: 0 },
-    regionStats: {},
-    sysConfig: {
-      show_price: true,
-      show_expire: true,
-      show_bw: true,
-      show_tf: true,
-      show_time: true,
-      site_title: 'Server Monitor'
+  const multiSite = hasMultipleApiBases()
+  const localTitle = getTitle() || DEFAULT_SITE_TITLE
+
+  const mergedData = createEmptyMergedData()
+  mergedData.sysConfig.site_title = multiSite ? localTitle : DEFAULT_SITE_TITLE
+
+  for (const result of results) {
+    mergeSiteResult(mergedData, result, multiSite, localTitle)
+  }
+
+  return mergedData
+}
+
+const createEmptyMergedData = () => ({
+  servers: [],
+  latestReportUpdates: [],
+  stats: { total: 0, online: 0, offline: 0, globalNetRx: 0, globalNetTx: 0, globalSpeedIn: 0, globalSpeedOut: 0 },
+  regionStats: {},
+  sysConfig: {
+    show_price: true,
+    show_expire: true,
+    show_tf: true,
+    show_time: true,
+    display_mode: 'bar',
+    site_title: DEFAULT_SITE_TITLE
+  }
+})
+
+const mergeSiteResult = (mergedData, { data, error, baseUrl }, multiSite, localTitle) => {
+  if (error || !data) return
+
+  const rawServers = Array.isArray(data.servers)
+    ? data.servers
+    : Object.entries(data.latestMetricsMap || {}).map(([id, metrics]) => ({ id, ...metrics }))
+
+  for (const server of rawServers) {
+    mergedData.servers.push({ ...server, source: baseUrl })
+  }
+
+  const latestReportUpdates = Array.isArray(data.latestReportUpdates) ? data.latestReportUpdates : []
+  for (const update of latestReportUpdates) {
+    if (!update || !update.serverId || !Array.isArray(update.samples)) continue
+    mergedData.latestReportUpdates.push({ ...update, source: baseUrl })
+  }
+
+  if (data.stats) {
+    mergedData.stats.total += data.stats.total || 0
+    mergedData.stats.online += data.stats.online || 0
+    mergedData.stats.offline += data.stats.offline || 0
+    mergedData.stats.globalNetRx += data.stats.globalNetRx || 0
+    mergedData.stats.globalNetTx += data.stats.globalNetTx || 0
+    mergedData.stats.globalSpeedIn += data.stats.globalSpeedIn || 0
+    mergedData.stats.globalSpeedOut += data.stats.globalSpeedOut || 0
+  }
+
+  if (data.regionStats) {
+    for (const code in data.regionStats) {
+      mergedData.regionStats[code] = (mergedData.regionStats[code] || 0) + data.regionStats[code]
     }
   }
 
-  for (const { data, error, baseUrl } of results) {
-    if (error || !data) continue
-
-    const rawServers = Array.isArray(data.servers)
-      ? data.servers
-      : Object.entries(data.latestMetricsMap || {}).map(([id, metrics]) => ({ id, ...metrics }))
-
-    for (const server of rawServers) {
-      mergedData.servers.push({ ...server, source: baseUrl })
-    }
-
-    if (data.stats) {
-      mergedData.stats.total += data.stats.total || 0
-      mergedData.stats.online += data.stats.online || 0
-      mergedData.stats.offline += data.stats.offline || 0
-      mergedData.stats.globalNetRx += data.stats.globalNetRx || 0
-      mergedData.stats.globalNetTx += data.stats.globalNetTx || 0
-      mergedData.stats.globalSpeedIn += data.stats.globalSpeedIn || 0
-      mergedData.stats.globalSpeedOut += data.stats.globalSpeedOut || 0
-    }
-
-    if (data.regionStats) {
-      for (const code in data.regionStats) {
-        mergedData.regionStats[code] = (mergedData.regionStats[code] || 0) + data.regionStats[code]
-      }
-    }
-
-    if (data.sysConfig) {
-      mergedData.sysConfig = {
-        show_price: data.sysConfig.show_price ?? mergedData.sysConfig.show_price,
-        show_expire: data.sysConfig.show_expire ?? mergedData.sysConfig.show_expire,
-        show_bw: data.sysConfig.show_bw ?? mergedData.sysConfig.show_bw,
-        show_tf: data.sysConfig.show_tf ?? mergedData.sysConfig.show_tf,
-        show_time: data.sysConfig.show_time ?? mergedData.sysConfig.show_time,
-        site_title: data.sysConfig.site_title || mergedData.sysConfig.site_title
-      }
+  if (data.sysConfig) {
+    mergedData.sysConfig = {
+      show_price: data.sysConfig.show_price ?? mergedData.sysConfig.show_price,
+      show_expire: data.sysConfig.show_expire ?? mergedData.sysConfig.show_expire,
+      show_tf: data.sysConfig.show_tf ?? mergedData.sysConfig.show_tf,
+      show_time: data.sysConfig.show_time ?? mergedData.sysConfig.show_time,
+      display_mode: resolveDisplayMode(data.sysConfig, mergedData.sysConfig.display_mode),
+      site_title: multiSite ? localTitle : mergedData.sysConfig.site_title
     }
   }
+}
+
+export const fetchServersAllWithProgress = async (onResult) => {
+  const multiSite = hasMultipleApiBases()
+  const localTitle = getTitle() || DEFAULT_SITE_TITLE
+
+  const mergedData = createEmptyMergedData()
+  mergedData.sysConfig.site_title = multiSite ? localTitle : DEFAULT_SITE_TITLE
+
+  let corsErrorSites = []
+
+  await http.getAllWithProgress('/api/servers', (result) => {
+    mergeSiteResult(mergedData, result, multiSite, localTitle)
+    if (result.corsError && !corsErrorSites.includes(result.baseUrl)) corsErrorSites.push(result.baseUrl)
+    onResult({ ...mergedData, corsErrorSites })
+  })
 
   return mergedData
 }
@@ -309,7 +329,7 @@ export const fetchServerDetail = async (id, apiIndex = 0) => {
 }
 
 export const fetchAllHistory = async (id, hours, apiIndex = 0) => {
-  const result = await http.getByIndex(`/api/history/all?id=${id}&hours=${hours}`, apiIndex)
+  const result = await http.getByIndex(`/api/history/all?id=${id}&hours=${hours}`, apiIndex, { autoRedirect: false })
   if (result.error) {
     const error = new Error(result.error)
     error.code = result.code
@@ -317,7 +337,7 @@ export const fetchAllHistory = async (id, hours, apiIndex = 0) => {
     error.message = result.message || result.error
     throw error
   }
-  return result.data
+  return Array.isArray(result.data) ? result.data : []
 }
 
 export const adminApi = async (data, apiIndex = 0) => {
@@ -341,12 +361,14 @@ export const logout = () => {
   localStorage.removeItem('jwt_token')
 }
 
-export const fetchConfig = async () => {
-  const result = await http.get('/api/config', { includeAuth: true, includeTurnstile: false })
+export const fetchConfig = async (apiIndex = 0) => {
+  const result = await http.getByIndex('/api/config', apiIndex, { includeAuth: true, includeTurnstile: false })
   if (result.error) return null
   if (result.data && result.data.version) {
     VERSION.value = result.data.version
   }
+  LAST_WORKERS_VERSION.value = result.data?.last_workers_version || ''
+  LAST_AGENT_VERSION.value = result.data?.last_agent_version || ''
   return result.data
 }
 
@@ -361,8 +383,8 @@ export const upgradeDatabase = async (apiIndex = 0) => {
   return result.data
 }
 
-export const rebuildDatabase = async (apiIndex = 0) => {
-  const result = await http.postByIndex('/rebuild', {}, apiIndex, { autoRedirect: false })
+export const clearHistory = async (apiIndex = 0) => {
+  const result = await http.postByIndex('/clearHistory', {}, apiIndex, { autoRedirect: false })
   if (result.error) {
     if (result.status === 401) {
       return { success: false, error: 'Unauthorized' }

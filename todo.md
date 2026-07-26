@@ -1,7 +1,20 @@
 待办事项：
-- [ ] windows上报脚本ping和丢包，以及删除旧进程问题
-- [ ] 新增一个仓库，用于纯前端项目开发，制作演示主题
-- [ ] 远程模式，访问后台多一个下拉选择，用于选择不同的 API 基础 URL，登录框以及登录后右上角选择，切换后清空登录信息刷新页面
+- [ ] Workers版本更新提示，Agent版本显示
+- [x] 服务器单独设置离线告警开关
+- [x] 合并getAllServers函数
+- [x] 上报后，插入新的history_partition_id字段
+- [x] 保证metrics_history表是优化状态
+- [x] settings新增history_id_optimized字段，如果已优化，自动改成true，其他全局调用判断是否优化，走缓存和清除缓存
+- [x] 离线通知等检查走新的主键查询
+- [x] getNextServerHistoryPartitionId函数，从缓存获取servers表
+- [x] 保证servers表是优化状态
+- [x] 新增server的时候，添加history_partition_id字段
+- [x] settings新增servers_optimized字段，如果是false，执行
+- [x] 多站点模式，载入一个显示一个，未完整载入的时候，底部显示载入中
+- [x] 多站点模式，跨域弹出提醒
+- [x] windows上报脚本ping和丢包，以及删除旧进程问题
+- [x] 新增一个仓库，用于纯前端项目开发，制作演示主题
+- [x] 远程模式，访问后台多一个下拉选择，用于选择不同的 API 基础 URL，登录框以及登录后右上角选择，切换后清空登录信息刷新页面
 - [x] 前端项目config.json，新增title,backgroundImage字段，前端根据配置标题和背景图片。
 - [x] 验证Websocket修改后的DO占用效果（daily Durable Objects free tier limit of 101562500000 duration）
 - [x] build去掉根据.env自动生成config.json文件，而且不能删除config.json文件

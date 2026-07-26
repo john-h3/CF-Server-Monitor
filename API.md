@@ -44,7 +44,7 @@
   - [3.11](#311-action-save_order---保存服务器排序) [`action: save_order`](#311-action-save_order---保存服务器排序) [- 保存服务器排序](#311-action-save_order---保存服务器排序)
 - [4. 系统维护端点](#4-系统维护端点)
   - [4.1](#41-post-updatedatabase---数据库迁移) [`POST /updateDatabase`](#41-post-updatedatabase---数据库迁移) [- 数据库迁移](#41-post-updatedatabase---数据库迁移)
-  - [4.2](#42-post-rebuild---数据库重建) [`POST /rebuild`](#42-post-rebuild---数据库重建) [- 数据库重建](#42-post-rebuild---数据库重建)
+  - [4.2](#42-post-clearhistory---清空历史数据) [`POST /clearHistory`](#42-post-clearhistory---清空历史数据) [- 清空历史数据](#42-post-clearhistory---清空历史数据)
   - [4.3](#43-get-__dohealth---durable-object-健康检查) [`GET /__do/health`](#43-get-__dohealth---durable-object-健康检查) [- Durable Object 健康检查](#43-get-__dohealth---durable-object-健康检查)
 - [5. 数据结构](#5-数据结构)
   - [5.1 Server 对象](#51-server-对象)
@@ -85,7 +85,7 @@
 
 #### C. JWT Bearer（管理操作 → 后续管理请求）
 
-- **使用位置**：所有非 `login` 的 `POST /admin/api`、`POST /updateDatabase`、`POST /rebuild`
+- **使用位置**：所有非 `login` 的 `POST /admin/api`、`POST /updateDatabase`、`POST /clearHistory`
 - **方式**：`Authorization: Bearer <token>` Header
 - **Token 签发**：`HS256` JWT，默认有效期 **604800 秒（7 天）**
 - **签名密钥**（优先级）：
@@ -207,7 +207,11 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
 - Headers：
   ```
   Content-Type: application/json
+  X-Agent-Version: <探针版本号>
+  X-Agent-Config-Schema: 2
+  X-Agent-Config-Md5: <最后成功应用的配置 MD5，首次为 none>
   ```
+  动态配置请求头为新版探针使用的可选字段；未携带时保持旧版响应协议。
 - Body（JSON）：
   ```json
   {
@@ -309,11 +313,19 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
 
 **Response**
 
-- 成功 `200 OK`：
+- 旧版探针（未携带 `X-Agent-Config-Schema: 2`）：返回 `200 OK`：
   ```
   OK
   ```
   （`Content-Type: text/plain`）
+- 新版探针且配置 MD5 一致：返回 `204 No Content`，不包含响应体。
+- 新版探针且配置 MD5 不一致：返回 `200 OK`，响应头携带新的
+  `X-Agent-Config-Md5`，响应体为按字段名排序的完整 QueryParam 配置：
+  ```text
+  collect_interval=0&report_interval=60&reset_day=1&schema_version=2
+  ```
+  （`Content-Type: application/x-www-form-urlencoded; charset=utf-8`）
+- 动态配置的字段范围、规范化及客户端校验规则详见 [AGENT_CONFIG.md](./AGENT_CONFIG.md)。
 - 失败：
   ```json
   { "error": "Invalid secret", "code": 401 }
@@ -349,20 +361,31 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
 
 ```json
 {
+  "version": "V2.7.11 Beta",
   "turnstile_enabled": true,
   "turnstile_site_key": "1x00000000000000000000AA",
   "verified": false,
   "turnstile_verified": "BASE64_AES_GCM_ENCRYPTED_STRING_OR_NULL",
+  "last_workers_version": "V2.7.11 Beta",
+  "last_agent_version": "1.3.0",
+  "theme_options": {
+    "a": 1,
+    "b": 2
+  },
   "show_long_history": true
 }
 ```
 
 | 字段                   | 类型           | 说明                                     |
 | -------------------- | ------------ | -------------------------------------- |
+| `version`            | string       | 当前部署自身 Workers 版本                         |
 | `turnstile_enabled`  | boolean      | 站点是否启用人机验证                             |
 | `turnstile_site_key` | string       | Turnstile 前端公钥；前端拿到后渲染 widget          |
 | `verified`           | boolean      | 当前请求是否携带了有效的 `X-Turnstile-Verified`    |
 | `turnstile_verified` | string\|null | 当次验证成功后回写给客户端的"已验证凭证"，客户端应回存并在 1 小时内复用 |
+| `last_workers_version` | string\|null | 登录时返回远程最新 Workers 版本；来源为 GitHub `version.json`，后端缓存 5 分钟 |
+| `last_agent_version` | string\|null | 登录时返回远程最新 Agent 版本；来源为 GitHub `version.json`，后端缓存 5 分钟 |
+| `theme_options`      | object       | 第三方主题自定义配置；未配置时为空对象，匿名请求也会返回 |
 | `show_long_history`  | boolean      | 是否允许查看超过 1 小时的历史曲线（未登录用户**强制** 1 小时上限） |
 
 > `X-Turnstile-Token` 携带且验证成功时，响应头会同步设置 `X-Turnstile-Verified`（加密串）。
@@ -395,7 +418,6 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
   "sysConfig": {
     "show_price": true,
     "show_expire": true,
-    "show_bw": true,
     "show_tf": true,
     "site_title": "My Server Monitor"
   }
@@ -428,15 +450,16 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
   "id": "9b2c...",
   "name": "HK-01",
   "server_group": "HK",
-  "price": "￥30/月",
+  "price": "30.00",
+  "billing_cycle": "month",
+  "auto_renewal": "0",
+  "currency": "¥",
   "expire_date": "2026-12-31",
-  "bandwidth": "1Gbps",
   "traffic_limit": "1TB",
   "traffic_calc_type": "total",
   "reset_day": 1,
   "collect_interval": 1,
   "report_interval": 60,
-  "ping_mode": "http",
   "is_hidden": "0",
   "sort_order": 0,
   "cpu": 12.34,
@@ -874,13 +897,18 @@ Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled === 
     "custom_bg": "https://...",
     "custom_head": "<style>...</style>",
     "custom_script": "console.log('hi');",
+    "appearance_options": {
+      "theme_options": {
+        "a": 1,
+        "b": 2
+      }
+    },
     "is_public": "true",
     "show_price": "true",
     "show_expire": "true",
-    "show_bw": "true",
     "show_tf": "true",
     "show_long_history": "true",
-    "tg_notify": "false",
+    "tg_notify": "0",
     "tg_bot_token": "",
     "tg_chat_id": "",
     "turnstile_enabled": "false",
@@ -894,8 +922,7 @@ Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled === 
     "custom_ct": "gd-ct-dualstack.ip.zstaticcdn.com",
     "custom_cu": "gd-cu-dualstack.ip.zstaticcdn.com",
     "custom_cm": "gd-cm-dualstack.ip.zstaticcdn.com",
-    "custom_bd": "lf3-ips.zstaticcdn.com",
-    "cleanup_skip_count": "0",
+    "custom_bd": "ip.zstaticcdn.com",
     "expire_reminder": "false"
   }
 }
@@ -903,7 +930,7 @@ Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled === 
 
 **字段分类**：
 
-- `APPEARANCE_FIELDS`（写入 `appearance_options` JSON）：`site_title`、`custom_bg`、`custom_head`、`custom_script`
+- `APPEARANCE_FIELDS`（写入 `appearance_options` JSON）：`site_title`、`custom_bg`、`custom_head`、`custom_script`、`csp_static`、`csp_api`、`display_mode`、`theme_options`
 - `SITE_FIELDS`（写入 `site_options` JSON）：上表除 appearance 之外的全部
 - 任何未列出的字段会被忽略
 
@@ -957,15 +984,16 @@ Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled === 
   "id": "<server UUID>",
   "name": "HK-01",                   // 可选，1~100 字符
   "server_group": "HK",               // 默认 "Default"
-  "price": "￥30/月",                  // 字符串
+  "price": "30.00",                   // 字符串，保存时自动转换为两位小数；"0" 或 "-1" 表示免费，空白表示未设置
+  "billing_cycle": "month",            // month | quarter | half_year | year | two_years | three_years | four_years | five_years
+  "auto_renewal": "0",                 // "0" | "1"
+  "currency": "¥",                     // ¥ | $ | € | £ | ₽ | ₣ | ₹ | ₫ | ฿
   "expire_date": "2026-12-31",
-  "bandwidth": "1Gbps",
   "traffic_limit": "1TB",
   "traffic_calc_type": "total",       // total | ...
   "reset_day": 1,                     // 1 ~ 31
   "collect_interval": 1,              // 秒
   "report_interval": 60,              // 秒
-  "ping_mode": "http",                // http | tcp
   "is_hidden": "0"                    // "0" | "1"
 }
 ```
@@ -1074,14 +1102,14 @@ Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled === 
 
 ***
 
-### 4.2 `POST /rebuild` - 数据库重建
+### 4.2 `POST /clearHistory` - 清空历史数据
 
-> **危险操作**：会删除 `servers` / `metrics_history` / `metrics_history_old` / `settings` 全部数据后重建。
+> **危险操作**：会删除 ``metrics_history` / `metrics_history_old` 全部数据后重建。
 
 **Request**
 
 - Method：`POST`
-- Path：`/rebuild`
+- Path：`/clearHistory`
 - Headers：`Authorization: Bearer <jwt>`
 
 **Response 200**
@@ -1124,15 +1152,16 @@ Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled === 
 | `id`                                          | string (UUID)      | 主键                        |
 | `name`                                        | string             | 显示名                       |
 | `server_group`                                | string             | 分组                        |
-| `price`                                       | string             | 价格文本（自由格式）                |
+| `price`                                       | string             | 价格金额文本，保存时规范为两位小数；`0` 或 `-1` 表示免费，空白表示未设置 |
+| `billing_cycle`                               | string             | `month` / `quarter` / `half_year` / `year` / `two_years` / `three_years` / `four_years` / `five_years` |
+| `auto_renewal`                                | string `"0"`/`"1"` | 是否启用自动续费                    |
+| `currency`                                    | string             | 货币符号：`¥` 人民币、`$` 美元、`€` 欧元、`£` 英镑、`₽` 卢布、`₣` 法郎、`₹` 卢比、`₫` 越南盾、`฿` 泰铢 |
 | `expire_date`                                 | string             | 到期日 `YYYY-MM-DD`          |
-| `bandwidth`                                   | string             | 带宽文本                      |
 | `traffic_limit`                               | string             | 流量上限文本                    |
 | `traffic_calc_type`                           | string             | `total` / 其他              |
 | `reset_day`                                   | number             | 流量重置日 1\~31               |
 | `collect_interval`                            | number             | 采集间隔（秒）                   |
 | `report_interval`                             | number             | 上报间隔（秒）                   |
-| `ping_mode`                                   | string             | `http` / `tcp`            |
 | `is_hidden`                                   | string `"0"`/`"1"` | 是否在前台隐藏                   |
 | `sort_order`                                  | number             | 排序值（越小越靠前）                |
 | `cpu`                                         | number             | 最新 CPU%（来自最新指标）           |
@@ -1157,6 +1186,7 @@ Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled === 
 | `gpu_info`                                    | string             | GPU 型号                    |
 | `arch`                                        | string             | 架构                        |
 | `os`                                          | string             | OS 名称                     |
+| `agent_version`                               | string             | 最新一次上报的探针版本号              |
 | `region`                                      | string             | 区域代码（大写，兼容 ISO 国家码）       |
 | `ip_v4`                                       | string `"0"`/`"1"` | IPv4 可达性                  |
 | `ip_v6`                                       | string `"0"`/`"1"` | IPv6 可达性                  |
@@ -1186,13 +1216,14 @@ Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled === 
   custom_bg: string,
   custom_head: string,           // 注入到 </head> 之前
   custom_script: string,         // 注入到 </body> 之前
+  display_mode: 'bar' | 'ring' | 'table',
+  theme_options: Record<string, unknown>,
   is_public: 'true' | 'false',
   show_price: 'true' | 'false',
   show_expire: 'true' | 'false',
-  show_bw: 'true' | 'false',
   show_tf: 'true' | 'false',
   show_long_history: 'true' | 'false',
-  tg_notify: 'true' | 'false',
+  tg_notify: '0' | '2' ... '30',    // 0 = 关闭；旧值 false 兼容为 0，true 兼容为 5
   tg_bot_token: string,
   tg_chat_id: string,
   turnstile_enabled: 'true' | 'false',
@@ -1203,11 +1234,10 @@ Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled === 
   password: string,              // PBKDF2 哈希值；旧版 MD5 哈希会在成功登录后自动升级
   cloudflare_account_id: string,
   cloudflare_token: string,
-  custom_ct: string,             // 电信测速节点域名
-  custom_cu: string,             // 联通
-  custom_cm: string,             // 移动
-  custom_bd: string,             // BGP
-  cleanup_skip_count: string,
+  custom_ct: string,             // 电信测速节点 host[:port]
+  custom_cu: string,             // 联通 host[:port]
+  custom_cm: string,             // 移动 host[:port]
+  custom_bd: string,             // BGP host[:port]
   expire_reminder: 'true' | 'false'
 }
 ```
@@ -1233,14 +1263,12 @@ Worker 同时注册了 cron 触发器（`scheduled` handler），可在 `wrangle
 | ------------- | --------------- | -------------------------------------------------------------- |
 | `*/1 * * * *` | 每分钟：检测离线节点      | `checkOfflineNodes`（通知）                                        |
 | `0 * * * *`   | 每小时：根据 UTC 日期分支 | 见下表                                                            |
-| <br />        | 每月 1 号 0 点：表轮换  | `monthlyCleanup`（重命名 metrics\_history → metrics\_history\_old） |
-| <br />        | 每月 8 号 0 点：删除旧表 | `dropMetricsHistoryOld`                                        |
+| <br />        | 每周日 0 点：表轮换    | `weeklyCleanup`（删除旧表、重命名 metrics\_history → metrics\_history\_old、创建新表） |
 | <br />        | 每天 12 点：服务器到期检测 | `checkExpiringServers`                                         |
 
 DEBUG 模式（`env.DEBUG=1`）下额外提供：
 
-- `* * 1 * *` → monthlyCleanup
-- `* * 8 * *` → dropMetricsHistoryOld
+- `0 0 * * 0` → weeklyCleanup
 - `0 12 * * *` → checkExpiringServers
 
 ***
@@ -1345,7 +1373,7 @@ curl -X POST https://status.example.com/admin/api \
 curl -X POST https://status.example.com/admin/api \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
-  -d '{"action":"edit","id":"9b2c4d3e-1a2b-4c5d-9e8f-7a6b5c4d3e2f","price":"￥35/月","expire_date":"2027-01-01"}'
+  -d '{"action":"edit","id":"9b2c4d3e-1a2b-4c5d-9e8f-7a6b5c4d3e2f","price":"35.00","billing_cycle":"month","auto_renewal":"1","currency":"¥","expire_date":"2027-01-01"}'
 ```
 
 ### 8.10 管理：删除
